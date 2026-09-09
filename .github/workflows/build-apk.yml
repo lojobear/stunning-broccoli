@@ -47,6 +47,16 @@ jobs:
           CI: '1'
         run: npx expo prebuild --platform android
 
+      - name: Add free offline Android engine
+        working-directory: mobile
+        run: |
+          node scripts/patch-native.cjs
+          mkdir -p android/app/src/main/assets
+          curl --fail --location --retry 3 \
+            https://storage.googleapis.com/ai-edge/interpreter-samples/super_resolution/android/ESRGAN.tflite \
+            --output android/app/src/main/assets/ESRGAN.tflite
+          test -s android/app/src/main/assets/ESRGAN.tflite
+
       - name: Embed standalone JavaScript bundle
         working-directory: mobile
         env:
@@ -63,7 +73,7 @@ jobs:
             --minify true
           test -s android/app/src/main/assets/index.android.bundle
 
-      - name: Build standalone debug-signed APK
+      - name: Build standalone offline APK
         working-directory: mobile/android
         env:
           NODE_ENV: production
@@ -71,17 +81,18 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:assembleDebug --no-daemon
 
-      - name: Verify bundle is packaged
+      - name: Verify offline engine is packaged
         run: |
           unzip -l mobile/android/app/build/outputs/apk/debug/app-debug.apk | grep -E 'assets/index.android.bundle|index.android.bundle'
+          unzip -l mobile/android/app/build/outputs/apk/debug/app-debug.apk | grep 'assets/ESRGAN.tflite'
 
       - name: Prepare APK
-        run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk ClarityForge-standalone.apk
+        run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk ClarityForge-offline.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ClarityForge-Standalone-APK
-          path: ClarityForge-standalone.apk
+          name: ClarityForge-Offline-APK
+          path: ClarityForge-offline.apk
           if-no-files-found: error
           retention-days: 30
