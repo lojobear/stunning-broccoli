@@ -47,19 +47,41 @@ jobs:
           CI: '1'
         run: npx expo prebuild --platform android
 
-      - name: Build installable debug APK
+      - name: Embed standalone JavaScript bundle
+        working-directory: mobile
+        env:
+          NODE_ENV: production
+          CI: '1'
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx expo export:embed \
+            --platform android \
+            --dev false \
+            --entry-file index.js \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res \
+            --minify true
+          test -s android/app/src/main/assets/index.android.bundle
+
+      - name: Build standalone debug-signed APK
         working-directory: mobile/android
+        env:
+          NODE_ENV: production
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleDebug --no-daemon
 
+      - name: Verify bundle is packaged
+        run: |
+          unzip -l mobile/android/app/build/outputs/apk/debug/app-debug.apk | grep -E 'assets/index.android.bundle|index.android.bundle'
+
       - name: Prepare APK
-        run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk ClarityForge-debug.apk
+        run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk ClarityForge-standalone.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ClarityForge-APK
-          path: ClarityForge-debug.apk
+          name: ClarityForge-Standalone-APK
+          path: ClarityForge-standalone.apk
           if-no-files-found: error
           retention-days: 30
