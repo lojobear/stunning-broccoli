@@ -19,10 +19,13 @@ if (!main.includes('add(ClarityForgePackage())')) {
 
 const gradlePath = path.join(root, 'android/app/build.gradle');
 let gradle = fs.readFileSync(gradlePath, 'utf8');
-if (!gradle.includes('org.tensorflow:tensorflow-lite')) {
-  const needle = 'dependencies {';
-  if (!gradle.includes(needle)) throw new Error('Could not find dependencies block in app/build.gradle');
-  gradle = gradle.replace(needle, `${needle}\n    implementation("org.tensorflow:tensorflow-lite:2.17.0")`);
+const needle = 'dependencies {';
+if (!gradle.includes(needle)) throw new Error('Could not find dependencies block in app/build.gradle');
+const deps = [];
+if (!gradle.includes('org.tensorflow:tensorflow-lite')) deps.push('    implementation("org.tensorflow:tensorflow-lite:2.17.0")');
+if (!gradle.includes('androidx.exifinterface:exifinterface')) deps.push('    implementation("androidx.exifinterface:exifinterface:1.3.7")');
+if (deps.length) {
+  gradle = gradle.replace(needle, `${needle}\n${deps.join('\n')}`);
   fs.writeFileSync(gradlePath, gradle);
 }
 
