@@ -1,0 +1,23 @@
+{
+  "name": "clarityforge-ai",
+  "version": "0.1.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "prebuild": "expo prebuild",
+    "build:apk": "eas build -p android --profile preview"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.0.0",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "expo": "~57.0.0",
+    "expo-file-system": "~57.0.6",
+    "expo-image-picker": "~57.0.16",
+    "expo-media-library": "~57.0.4",
+    "react": "19.2.3",
+    "react-native": "0.86.0"
+  },
+  "devDependencies": {}
+}
