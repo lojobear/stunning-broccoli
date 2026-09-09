@@ -6,9 +6,11 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.net.Uri
+import androidx.exifinterface.media.ExifInterface
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -18,6 +20,7 @@ import org.tensorflow.lite.Interpreter
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
@@ -36,10 +39,14 @@ class ClarityForgeLocalModule(private val context: ReactApplicationContext) : Re
         executor.execute {
             try {
                 val params = try { JSONObject(paramsJson) } catch (_: Exception) { JSONObject() }
-                var bitmap = loadBitmap(uri)
+                val bitmap = loadBitmap(uri)
                 val strength = params.optDouble("strength", 0.55).toFloat().coerceIn(0f, 1f)
                 val result = when (tool) {
-                    "upscale" -> aiUpscale(bitmap, params.optInt("scale", 2).coerceIn(2, 4))
+                    "upscale" -> aiUpscale(
+                        bitmap,
+                        params.optInt("scale", 2).coerceIn(2, 4),
+                        params.optString("mode", "fast")
+                    )
                     "sharpen" -> sharpen(bitmap, 0.45f + strength * 1.4f)
                     "sharpen_auto" -> sharpen(bitmap, 0.85f)
                     "unblur" -> sharpen(bitmap, 0.8f + strength * 1.8f)
@@ -51,25 +58,49 @@ class ClarityForgeLocalModule(private val context: ReactApplicationContext) : Re
                     "autopilot", "smart_enhance" -> sharpen(denoise(autoRelight(bitmap), 0.28f + strength * 0.18f), 0.55f + strength * 0.45f)
                     else -> throw IllegalArgumentException("$tool is not available fully offline yet.")
                 }
-                if (result !== bitmap && bitmap !== result && !bitmap.isRecycled) bitmap.recycle()
+                if (result !== bitmap && !bitmap.isRecycled) bitmap.recycle()
                 promise.resolve(saveBitmap(result))
+                if (!result.isRecycled) result.recycle()
             } catch (e: Throwable) {
                 promise.reject("LOCAL_PROCESSING_FAILED", e.message ?: "Local processing failed", e)
             }
         }
     }
 
+    private fun openInput(uri: Uri): InputStream? = try {
+        if (uri.scheme == "file") FileInputStream(uri.path!!) else context.contentResolver.openInputStream(uri)
+    } catch (_: Exception) { null }
+
     private fun loadBitmap(uriString: String): Bitmap {
         val uri = Uri.parse(uriString)
-        val stream = try {
-            context.contentResolver.openInputStream(uri)
-        } catch (_: Exception) {
-            if (uri.scheme == "file") FileInputStream(uri.path!!) else null
-        } ?: throw IllegalArgumentException("Could not open the selected image")
-        stream.use {
-            return BitmapFactory.decodeStream(it)?.copy(Bitmap.Config.ARGB_8888, true)
-                ?: throw IllegalArgumentException("Could not decode the selected image")
+        val orientation = try {
+            openInput(uri)?.use { input ->
+                ExifInterface(input).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            } ?: ExifInterface.ORIENTATION_NORMAL
+        } catch (_: Exception) { ExifInterface.ORIENTATION_NORMAL }
+
+        val decoded = openInput(uri)?.use {
+            BitmapFactory.decodeStream(it)?.copy(Bitmap.Config.ARGB_8888, true)
+        } ?: throw IllegalArgumentException("Could not decode the selected image")
+        return orientBitmap(decoded, orientation)
+    }
+
+    private fun orientBitmap(src: Bitmap, orientation: Int): Bitmap {
+        if (orientation == ExifInterface.ORIENTATION_NORMAL || orientation == ExifInterface.ORIENTATION_UNDEFINED) return src
+        val m = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.setScale(-1f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.setRotate(180f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> { m.setRotate(180f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_TRANSPOSE -> { m.setRotate(90f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_ROTATE_90 -> m.setRotate(90f)
+            ExifInterface.ORIENTATION_TRANSVERSE -> { m.setRotate(-90f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.setRotate(-90f)
+            else -> return src
         }
+        val out = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+        if (out !== src && !src.isRecycled) src.recycle()
+        return out
     }
 
     private fun saveBitmap(bitmap: Bitmap): String {
@@ -153,9 +184,9 @@ class ClarityForgeLocalModule(private val context: ReactApplicationContext) : Re
             var i = y * w + 1
             for (x in 1 until w - 1) {
                 val c = p[i]
-                val q = intArrayOf(p[i-w-1],p[i-w],p[i-w+1],p[i-1],p[i+1],p[i+w-1],p[i+w],p[i+w+1])
                 var rr=0; var gg=0; var bb=0
-                for (v in q) { rr+=Color.red(v); gg+=Color.green(v); bb+=Color.blue(v) }
+                val ids = intArrayOf(i-w-1,i-w,i-w+1,i-1,i+1,i+w-1,i+w,i+w+1)
+                for (id in ids) { val v=p[id]; rr+=Color.red(v); gg+=Color.green(v); bb+=Color.blue(v) }
                 out[i] = Color.argb(Color.alpha(c), mix(Color.red(c),rr/8f), mix(Color.green(c),gg/8f), mix(Color.blue(c),bb/8f))
                 i++
             }
@@ -170,15 +201,38 @@ class ClarityForgeLocalModule(private val context: ReactApplicationContext) : Re
             val bytes = context.assets.open("ESRGAN.tflite").use { it.readBytes() }
             val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
             buffer.put(bytes); buffer.rewind()
-            val options = Interpreter.Options().apply { setNumThreads(4); setUseNNAPI(true) }
+            val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+            val options = Interpreter.Options().apply {
+                setNumThreads(threads)
+                setUseXNNPACK(true)
+                setUseNNAPI(true)
+            }
             return Interpreter(buffer, options).also { esrgan = it }
         }
     }
 
-    private fun aiUpscale(original: Bitmap, requestedScale: Int): Bitmap {
+    private class EsrganWorkspace(inW: Int, inH: Int, outW: Int, outH: Int) {
+        val tile = Bitmap.createBitmap(inW, inH, Bitmap.Config.ARGB_8888)
+        val tileCanvas = Canvas(tile)
+        val inputPixels = IntArray(inW * inH)
+        val input = ByteBuffer.allocateDirect(inW * inH * 3 * 4).order(ByteOrder.nativeOrder())
+        val output = ByteBuffer.allocateDirect(outW * outH * 3 * 4).order(ByteOrder.nativeOrder())
+        val outputPixels = IntArray(outW * outH)
+        val outputBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+
+        fun recycle() {
+            if (!tile.isRecycled) tile.recycle()
+            if (!outputBitmap.isRecycled) outputBitmap.recycle()
+        }
+    }
+
+    private fun aiUpscale(original: Bitmap, requestedScale: Int, mode: String): Bitmap {
         val scale = if (requestedScale >= 4) 4 else 2
-        val maxOutputEdge = 4096
-        val maxInputEdge = maxOutputEdge / scale
+        val maxInputEdge = if (mode == "quality") {
+            4096 / scale
+        } else {
+            if (scale == 4) 768 else 1024
+        }
         val longEdge = max(original.width, original.height)
         val source = if (longEdge > maxInputEdge) {
             val s = maxInputEdge.toFloat() / longEdge
@@ -196,43 +250,52 @@ class ClarityForgeLocalModule(private val context: ReactApplicationContext) : Re
 
         val result = Bitmap.createBitmap(source.width * scale, source.height * scale, Bitmap.Config.ARGB_8888)
         val resultCanvas = Canvas(result)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        var y = 0
-        while (y < source.height) {
-            val actualH = min(tileH, source.height - y)
-            var x = 0
-            while (x < source.width) {
-                val actualW = min(tileW, source.width - x)
-                val tile = Bitmap.createBitmap(tileW, tileH, Bitmap.Config.ARGB_8888)
-                Canvas(tile).drawBitmap(source, Rect(x,y,x+actualW,y+actualH), Rect(0,0,actualW,actualH), paint)
-                val ai4 = runEsrganTile(interpreter, tile, tileW, tileH, modelOutW, modelOutH)
-                val crop = Bitmap.createBitmap(ai4, 0, 0, actualW * modelScaleX, actualH * modelScaleY)
-                val finalTile = if (scale == modelScaleX) crop else Bitmap.createScaledBitmap(crop, actualW*scale, actualH*scale, true)
-                resultCanvas.drawBitmap(finalTile, (x*scale).toFloat(), (y*scale).toFloat(), paint)
-                if (finalTile !== crop) finalTile.recycle()
-                if (crop !== ai4) crop.recycle()
-                ai4.recycle(); tile.recycle()
-                x += tileW
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        val work = EsrganWorkspace(tileW, tileH, modelOutW, modelOutH)
+
+        try {
+            var y = 0
+            while (y < source.height) {
+                val actualH = min(tileH, source.height - y)
+                var x = 0
+                while (x < source.width) {
+                    val actualW = min(tileW, source.width - x)
+                    work.tile.eraseColor(Color.BLACK)
+                    work.tileCanvas.drawBitmap(source, Rect(x,y,x+actualW,y+actualH), Rect(0,0,actualW,actualH), paint)
+                    runEsrganTile(interpreter, work, tileW, tileH, modelOutW, modelOutH)
+                    val srcRect = Rect(0, 0, actualW * modelScaleX, actualH * modelScaleY)
+                    val dstRect = Rect(x * scale, y * scale, (x + actualW) * scale, (y + actualH) * scale)
+                    resultCanvas.drawBitmap(work.outputBitmap, srcRect, dstRect, paint)
+                    x += tileW
+                }
+                y += tileH
             }
-            y += tileH
+        } finally {
+            work.recycle()
+            if (source !== original && !source.isRecycled) source.recycle()
         }
-        if (source !== original) source.recycle()
         return result
     }
 
-    private fun runEsrganTile(interpreter: Interpreter, tile: Bitmap, inW: Int, inH: Int, outW: Int, outH: Int): Bitmap {
-        val pixels = IntArray(inW * inH); tile.getPixels(pixels,0,inW,0,0,inW,inH)
-        val input = ByteBuffer.allocateDirect(inW*inH*3*4).order(ByteOrder.nativeOrder())
-        for (c in pixels) { input.putFloat(Color.red(c).toFloat()); input.putFloat(Color.green(c).toFloat()); input.putFloat(Color.blue(c).toFloat()) }
-        input.rewind()
-        val output = Array(1) { Array(outH) { Array(outW) { FloatArray(3) } } }
-        interpreter.run(input, output)
-        val outPixels = IntArray(outW*outH); var k=0
-        for (yy in 0 until outH) for (xx in 0 until outW) {
-            val v=output[0][yy][xx]
-            val r=v[0].roundToInt().coerceIn(0,255); val g=v[1].roundToInt().coerceIn(0,255); val b=v[2].roundToInt().coerceIn(0,255)
-            outPixels[k++]=Color.rgb(r,g,b)
+    private fun runEsrganTile(interpreter: Interpreter, work: EsrganWorkspace, inW: Int, inH: Int, outW: Int, outH: Int) {
+        work.tile.getPixels(work.inputPixels, 0, inW, 0, 0, inW, inH)
+        work.input.clear()
+        for (c in work.inputPixels) {
+            work.input.putFloat(Color.red(c).toFloat())
+            work.input.putFloat(Color.green(c).toFloat())
+            work.input.putFloat(Color.blue(c).toFloat())
         }
-        return Bitmap.createBitmap(outPixels,outW,outH,Bitmap.Config.ARGB_8888)
+        work.input.rewind()
+        work.output.clear()
+        interpreter.run(work.input, work.output)
+        work.output.rewind()
+        var k = 0
+        while (k < work.outputPixels.size) {
+            val r = work.output.getFloat().roundToInt().coerceIn(0,255)
+            val g = work.output.getFloat().roundToInt().coerceIn(0,255)
+            val b = work.output.getFloat().roundToInt().coerceIn(0,255)
+            work.outputPixels[k++] = Color.rgb(r,g,b)
+        }
+        work.outputBitmap.setPixels(work.outputPixels, 0, outW, 0, 0, outW, outH)
     }
 }
