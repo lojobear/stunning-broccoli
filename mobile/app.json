@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "ClarityForge AI",
+    "slug": "clarityforge-ai",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "android": {
+      "package": "com.logaan.clarityforge"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "ClarityForge uses your photos only when you choose an image to enhance.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "ClarityForge can read images you choose to enhance.",
+          "savePhotosPermission": "ClarityForge can save enhanced images to your photo library."
+        }
+      ]
+    ]
+  }
+}
