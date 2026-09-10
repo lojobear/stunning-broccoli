@@ -5,7 +5,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import * as MediaLibrary from 'expo-media-library';
+import * as MediaLibrary from 'expo-media-library/legacy';
+import * as FileSystem from 'expo-file-system/legacy';
 import { TOOLS } from './src/tools';
 import { hasLocalEngine, processLocalImage } from './src/local';
 
@@ -102,12 +103,45 @@ export default function App() {
     }
   }
 
+  async function saveWithFolderPicker(uri, galleryError) {
+    try {
+      const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!permissions.granted) {
+        if (galleryError) throw galleryError;
+        return;
+      }
+      const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+      const destination = await FileSystem.StorageAccessFramework.createFileAsync(
+        permissions.directoryUri,
+        `ClarityForge-${Date.now()}`,
+        'image/jpeg'
+      );
+      await FileSystem.writeAsStringAsync(destination, base64, { encoding: FileSystem.EncodingType.Base64 });
+      Alert.alert('Saved', 'Enhanced image saved to the folder you selected.');
+    } catch (e) {
+      Alert.alert('Save failed', e?.message || 'Android could not save the enhanced image.');
+    }
+  }
+
   async function saveUri(uri) {
     if (!uri) return;
-    const perm = await MediaLibrary.requestPermissionsAsync();
-    if (!perm.granted) return Alert.alert('Permission needed', 'Photo-library permission is required to save the result.');
-    await MediaLibrary.saveToLibraryAsync(uri);
-    Alert.alert('Saved', 'Enhanced image saved to your photo library.');
+    try {
+      const permission = await MediaLibrary.requestPermissionsAsync(true);
+      if (!permission.granted) {
+        return saveWithFolderPicker(uri, new Error('Gallery permission was not granted.'));
+      }
+      await MediaLibrary.saveToLibraryAsync(uri);
+      Alert.alert('Saved', 'Enhanced image saved to your Gallery.');
+    } catch (e) {
+      Alert.alert(
+        'Gallery save unavailable',
+        'ClarityForge will open Android’s folder picker so you can save the image directly to Downloads or another folder.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Choose folder', onPress: () => saveWithFolderPicker(uri, e) }
+        ]
+      );
+    }
   }
 
   function control() {
